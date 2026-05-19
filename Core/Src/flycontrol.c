@@ -81,9 +81,9 @@ void FlyController_Init(FlyController *fc)
 	fc->yaw_inner.integral_max = 800.0f;
 	fc->yaw_inner.dterm_lpf = 0.12f;
 	
-	fc->altitude.kp = 260.0f;
+	fc->altitude.kp = 160.0f;
 	fc->altitude.ki = 2.0f;
-	fc->altitude.kd = 4800.0f;
+	fc->altitude.kd = 5200.0f;
 	fc->altitude.integral_max = 300.0f;
 	fc->altitude.dterm_lpf = 0.08f;
 
