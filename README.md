@@ -137,4 +137,4 @@ FreeRTOS + CMSIS-RTOS2 封装，共 4 个任务：
 
 ## License
 
-本项目仅供学习参考。
+本项目基于 MIT 协议开源。
