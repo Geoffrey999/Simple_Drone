@@ -45,15 +45,15 @@ void FlyController_Init(FlyController *fc)
 {
 	memset(fc, 0, sizeof(FlyController));
 
-	fc->roll_outer.kp = 7.0f;
+	fc->roll_outer.kp = 5.0f;
 	fc->roll_outer.ki = 0.6f;
-	fc->roll_outer.kd = 0.12f;
+	fc->roll_outer.kd = 0.08f;
 	fc->roll_outer.integral_max = 600.0f;
 	fc->roll_outer.dterm_lpf = 0.16f;
 
-	fc->pitch_outer.kp = 7.0f;
+	fc->pitch_outer.kp = 5.0f;
 	fc->pitch_outer.ki = 0.6f;
-	fc->pitch_outer.kd = 0.12f;
+	fc->pitch_outer.kd = 0.08f;
 	fc->pitch_outer.integral_max = 600.0f;
 	fc->pitch_outer.dterm_lpf = 0.16f;
  
@@ -63,15 +63,15 @@ void FlyController_Init(FlyController *fc)
 	fc->yaw_outer.integral_max = 200.0f;
 	fc->yaw_outer.dterm_lpf = 1.0f;
 
-	fc->roll_inner.kp = 10.2f;
+	fc->roll_inner.kp = 6.2f;
 	fc->roll_inner.ki = 0.3f;//0.6
-	fc->roll_inner.kd = 0.05f;
+	fc->roll_inner.kd = 0.03f;
 	fc->roll_inner.integral_max = 300.0f;
 	fc->roll_inner.dterm_lpf = 0.12f;
 
-	fc->pitch_inner.kp = 10.2f;
+	fc->pitch_inner.kp = 6.2f;
 	fc->pitch_inner.ki = 0.3f;
-	fc->pitch_inner.kd = 0.05f;  
+	fc->pitch_inner.kd = 0.03f;  
 	fc->pitch_inner.integral_max = 300.0f;
 	fc->pitch_inner.dterm_lpf = 0.12f;
 
@@ -79,7 +79,7 @@ void FlyController_Init(FlyController *fc)
 	fc->yaw_inner.ki = 0.0f;
 	fc->yaw_inner.kd = 0.06f;
 	fc->yaw_inner.integral_max = 800.0f;
-	fc->yaw_inner.dterm_lpf = 0.12f;
+	fc->yaw_inner.dterm_lpf = 0.2f;
 	
 	fc->altitude.kp = 160.0f;
 	fc->altitude.ki = 2.0f;
@@ -138,10 +138,10 @@ void FlyController_Update(FlyController *fc, ICM42605_Data *imu_data)
 	float pitch_output = PID_Update(&fc->pitch_inner, pitch_inner_error, dt);
 	float yaw_output = PID_Update(&fc->yaw_inner, yaw_inner_error, dt);
 	
-	float altitude_output = 0.0f;
+	static float altitude_output = 0.0f;
 	static float saved_altitude_output = 0.0f;
 	
-	if (fc->flying_status == HORIZON_FLYING)
+	if (fc->flying_status == ANGLE_FLYING)
 	{
 		saved_altitude_output = 0.0f;
 

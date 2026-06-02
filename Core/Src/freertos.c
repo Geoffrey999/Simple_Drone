@@ -61,7 +61,7 @@
 /* USER CODE BEGIN Variables */
 #define ARM_UNLOCKED    2000
 #define MODE_ALT_HOLD   1000
-#define MODE_HORIZON   	2000
+#define MODE_ANGLE   	2000
 #define MODE_LANDING  	1500
 Tx_Frame_t tx_frame_buf;
 ICM42605_Data imu_data;
@@ -307,7 +307,7 @@ void StartIMUReadTask(void *argument)
   /* USER CODE BEGIN StartIMUReadTask */
 	uint8_t imu_init_ok = 0;
 	LowPassFilter_t gyro_filter;
-	LowPass_Init(&gyro_filter, 0.51f);
+	LowPass_Init(&gyro_filter, 0.8f);
 	osDelay(2000);
 	HAL_GPIO_WritePin(GPIOB,GPIO_PIN_8,GPIO_PIN_RESET);
 	imu_data.sample_period = 0.001f;
@@ -328,9 +328,9 @@ void StartIMUReadTask(void *argument)
 	{
 		last_tick = xTaskGetTickCount();
 		ICM42605_UpdateData(&imu_data);
-		imu_data.filtered_gyro_x = LowPass_Update(&gyro_filter,imu_data.gyro_x);
-		imu_data.filtered_gyro_y = LowPass_Update(&gyro_filter,imu_data.gyro_y);
-		imu_data.filtered_gyro_z = LowPass_Update(&gyro_filter,imu_data.gyro_z);
+//		imu_data.filtered_gyro_x = LowPass_Update(&gyro_filter,imu_data.gyro_x);
+//		imu_data.filtered_gyro_y = LowPass_Update(&gyro_filter,imu_data.gyro_y);
+//		imu_data.filtered_gyro_z = LowPass_Update(&gyro_filter,imu_data.gyro_z);
 			IMU_Packet_t pkt;
 			pkt.roll         = imu_data.angle.roll;
 			pkt.pitch        = imu_data.angle.pitch;
@@ -548,10 +548,10 @@ void StartFlyControlTask(void *argument)
 				fc.flying_status = ALTITUDE_HOLD_FLYING;
 				HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
 			}
-			else if(current_rc.mode == MODE_HORIZON)
+			else if(current_rc.mode == MODE_ANGLE)
 			{
 				target_throttle = (current_rc.throttle - 1000.0f) * THROTTLE_TO_PWM_MULTIPLE_SCALE;
-				fc.flying_status = HORIZON_FLYING;
+				fc.flying_status = ANGLE_FLYING;
 				HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
 			}
 			else

@@ -36,7 +36,7 @@ typedef struct {
 typedef enum{
 	LANDED=0,
 	LANDING,
-	HORIZON_FLYING,
+	ANGLE_FLYING,
 	ALTITUDE_HOLD_FLYING
 }Drone_Flying_Status;
 
