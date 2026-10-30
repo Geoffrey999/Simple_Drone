@@ -1,8 +1,8 @@
 #include "protocol.h"
 
 uint8_t Usart1DmaBuf[RX_FRAME_SIZE];
-volatile uint16_t Usart1RxLen = 0;
-uint16_t Throttle = 0;
+//volatile uint16_t Usart1RxLen = 0;
+//uint16_t Throttle = 0;
 
 void USART1_DMA_Rx_Init(void)
 {

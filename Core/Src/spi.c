@@ -79,7 +79,7 @@ void MX_SPI3_Init(void)
   hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi3.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi3.Init.NSS = SPI_NSS_SOFT;
-  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   hspi3.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi3.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi3.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -182,7 +182,10 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* spiHandle)
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /* USER CODE BEGIN SPI3_MspInit 1 */
-
+    /* 说明：SPI3(黑匣子 W25Q128)采用**阻塞式**传输(HAL_SPI_Transmit/Receive)，
+     * 不使用中断或 DMA，所以这里不需要配置 NVIC。
+     * 用阻塞式的原因：Flash 操作本就在最低优先级任务里，阻塞它不影响 1kHz 控制环，
+     * 而 W25Q128 自身耗时(页写 0.7~3ms、扇区擦 45ms)远大于 SPI 传几个字节的时间。 */
   /* USER CODE END SPI3_MspInit 1 */
   }
 }

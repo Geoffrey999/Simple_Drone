@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "stdio.h"
 #include "protocol.h"
+#include "usart.h"
 #include "FreeRTOS.h"
 #include "stream_buffer.h"
 /* USER CODE END Includes */
@@ -68,6 +69,9 @@ extern UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN EV */
 extern StreamBufferHandle_t usart1RxStreamBuf;
+/* 黑匣子：SPI3(W25Q128) 中断模式传输 + USART3 指令 DMA 接收 */
+extern SPI_HandleTypeDef hspi3;
+extern DMA_HandleTypeDef hdma_usart3_rx;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -239,6 +243,22 @@ void DMA2_Stream7_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/**
+  * @brief DMA1 Stream1 全局中断：USART3(上位机指令通道)接收。
+  *        循环 DMA 正常无需 CPU 干预；这里额外处理"传输错误"，
+  *        因为 DMA 一旦出错会静默停摆，现象和"没接线"一样。
+  */
+void DMA1_Stream1_IRQHandler(void)
+{
+  if (__HAL_DMA_GET_FLAG(&hdma_usart3_rx, DMA_FLAG_TEIF1_5) != 0U)
+  {
+    __HAL_DMA_CLEAR_FLAG(&hdma_usart3_rx, DMA_FLAG_TEIF1_5);
+    USART3_OnDmaError();
+  }
+  HAL_DMA_IRQHandler(&hdma_usart3_rx);
+}
+
 void USART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART1_IRQn 0 */

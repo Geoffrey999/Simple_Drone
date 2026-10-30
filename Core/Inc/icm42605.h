@@ -53,6 +53,28 @@ extern "C" {
 #define ICM42605_REG_ACCEL_CONFIG0      0x50
 #define ICM42605_REG_GYRO_CONFIG1       0x51
 #define ICM42605_REG_GYRO_ACCEL_CONFIG0 0x52
+
+/* UI 低通带宽索引（写进 GYRO_ACCEL_CONFIG0 的高低半字节）。
+ * 取值含义（ICM42605 数据手册，ODR=1kHz 时换算）：
+ *   0: BW = ODR/2  = 500Hz   ← 等于不滤波
+ *   1: BW = 400Hz
+ *   2: BW = 200Hz   ← 陀螺当前选用
+ *   3: BW = 125Hz
+ *   4: BW = 100Hz
+ *   5: BW = 62.5Hz
+ *   6: BW = 50Hz
+ *   7: BW = 25Hz
+ *
+ * 调参记录（都基于黑匣子实测）：
+ *   · 索引 0（原值）：310~320Hz 振动完全通过，陀螺 RMS 42 deg/s。
+ *   · 索引 3（125Hz）：振动压得很好（>100Hz 能量降 11.6 倍），
+ *     但相位滞后把内环自激从 10Hz/RMS11 放大到 11.5Hz/RMS28，出现明显抖动。
+ *   · 索引 2（200Hz，当前）：折中。310Hz 主要交给 315Hz 陷波 + 软件低通，
+ *     内部只保留必要的抗混叠（挡住 500Hz 以上的有刷电机换向噪声）。
+ *   振动回升 → 往 3/4 调；仍有自激 → 往 1 调（400Hz，几乎无滞后）。
+ */
+#define ICM42605_GYRO_UI_BW_IDX         1U
+#define ICM42605_ACCEL_UI_BW_IDX        3U
 #define ICM42605_REG_ACCEL_CONFIG1      0x53
 #define ICM42605_REG_TMST_CONFIG        0x54
 #define ICM42605_REG_APEX_CONFIG0       0x56
@@ -171,12 +193,17 @@ typedef struct {
     float accel_offset_x;
     float accel_offset_y;
     float accel_offset_z;
+
+    float accel_scale_x;
+    float accel_scale_y;
+    float accel_scale_z;
     
     float sample_period;
     float beta;
-    float zeta;
     
     float tilt_total;
+		float vert_accel;
+		float filtered_vert_accel;
 } ICM42605_Data;
 
 void ICM42605_CS_Low(void);
@@ -189,6 +216,36 @@ uint8_t ICM42605_Init(void);
 void ICM42605_ReadRawData(ICM42605_Data *data);
 void ICM42605_UpdateData(ICM42605_Data *data);
 void ICM42605_Calibrate(ICM42605_Data *data, uint16_t samples);
+void ICM42605_SixSideCalibrate(ICM42605_Data *data, uint16_t samples_per_face);
+
+/* 加速度计三轴低通（修复 3.1）：使用前必须先调用一次 */
+void ICM42605_InitAccelLPF(void);/* 陀螺零偏在线估计（修复 2） */
+void ICM42605_SetArmed(uint8_t armed);
+void ICM42605_ResetBiasTracker(ICM42605_Data *data);
+
+/* 供黑匣子记录的解算内部量 */
+float ICM42605_GetAccelConfidence(void);
+float ICM42605_GetSamplePeriod(void);
+/* 上电标定期间三轴陀螺标准差之和（deg/s）。静止标定应 < 0.5，
+ * 偏大说明标定时飞机被扰动，零偏不可信（会造成恒定方向偏飞）。 */
+float ICM42605_GetCalibStd(void);
+
+/* ── 校准参数化（档 2：只做零偏）────────────────────────────────
+ * 上电时如果有存过的标定结果（cal.* 参数非 0），用 ICM42605_SetCalibration()
+ * 直接灌进去，不再要求"上电后静止 1 秒"；没有就退回 ICM42605_Calibrate()。
+ *
+ * 重新标定由控制台触发：ICM42605_RequestCalibration() 只置一个请求，
+ * 真正的测量在 IMU 任务里做（ICM42605_ServiceCalibration()），
+ * 避免控制台任务和 IMU 任务同时抢 SPI。 */
+void    ICM42605_SetCalibration(ICM42605_Data *data,
+                                float gx_dps, float gy_dps, float gz_dps,
+                                float ax_g, float ay_g, float az_g);
+void    ICM42605_RequestCalibration(void);
+uint8_t ICM42605_ServiceCalibration(ICM42605_Data *data, uint8_t armed);
+/* 0=空闲 1=已请求 2=正在标定 3=完成 4=被拒绝(解锁中) */
+uint8_t ICM42605_CalibrationState(void);
+void    ICM42605_GetCalibration(float *gx_dps, float *gy_dps, float *gz_dps,
+                                float *ax_g, float *ay_g, float *az_g);
 
 void Quaternion_Init(Quaternion *q);
 void Quaternion_Update(Quaternion *q, Vector3f *gyro, Vector3f *accel, float dt, float beta);

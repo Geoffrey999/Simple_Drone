@@ -1,140 +1,455 @@
-# F405 Drone Flight Controller
+# F405 四轴飞控
 
-基于 STM32F405 的四轴飞行器飞控固件，运行 FreeRTOS 实时操作系统。
+基于 **STM32F405** 的小型四轴飞控固件（Keil MDK / FreeRTOS），配套一套 Python 上位机工具链
+（黑匣子解析、参数管理、调参面板）。
 
-## 硬件平台
+当前版本 **v0.2.0**，主要能力：
 
-- **MCU**: STM32F405RGT6 (Cortex-M4F, 168MHz)
-- **IMU**: TDK ICM-42605 (6 轴陀螺仪 + 加速度计) — SPI 接口
-- **气压计**: Bosch BMP280 — 软件 I2C 接口
-- **电池监测**: 板载 ADC 分压采样
-- **电机输出**: TIM3 四通道 PWM 
-- **遥控器输入**: USART1 — DMA 接收
+| 能力 | 说明 |
+|---|---|
+| 姿态控制 | 串级 PID（角度外环 → 角速率内环），Madgwick 姿态解算 |
+| 飞行模式 | 手动（HORIZON）/ 定高（ALT_HOLD）/ 降落（LANDING），开关切换带 250 ms 去抖 |
+| 高度估计 | 三状态观测器（高度 / 垂速 / 加计偏置），气压 + 加计融合 |
+| 定高 | 摇杆映射目标垂速，**悬停油门自学习 + 电池电压补偿** |
+| 降落 | flare 剖面自动收敛到 0.25 m/s，5 条触地判据 + 气压卫生门控 |
+| 混控 | X 型四轴 + **抗饱和**（差动超限时按比例缩放，不改变平均推力） |
+| 手动油门曲线 | 四点分段线性，可把悬停区段压平（手动模式专用） |
+| 参数 | 82 项，存内部 Flash 模拟 EEPROM（双 bank + 序列号 + 历史回滚） |
+| 黑匣子 | W25Q128 16 MB，32 B 定长帧，1 kHz 飞行数据 + 20 Hz 高度帧 + 摇杆帧 |
+| 上位机 | 命令行 + tkinter 图形面板 + 自动分析报告 |
 
-## 软件架构
+---
 
-### 实时操作系统
+## 1. 硬件平台
 
-FreeRTOS + CMSIS-RTOS2 封装，共 4 个任务：
+| 项目 | 型号 / 参数 |
+|---|---|
+| MCU | STM32F405RG，Cortex-M4F，**168 MHz**（HSE 8 MHz，PLLM=4/PLLN=168/PLLP=2），APB1 42 MHz / APB2 84 MHz |
+| 姿态传感器 | ICM42605，**SPI1**，1 kHz 采样 |
+| 气压计 | BMP280，**软件 IIC**（GPIO 模拟），50 ms 采样，IIR 系数 2 |
+| 黑匣子 | W25Q128JVSIQ 16 MB，**SPI3** |
+| 电机输出 | **TIM3 CH1~CH4**，PWM 20 kHz（84 MHz / 4200），占空比 0~4200 |
+| 遥控输入 | **USART1** + DMA，32 B 定长帧（含校验） |
+| 上位机通道 | **USART3**，460800，DMA 环形接收 |
+| 电池检测 | **ADC1 通道 14（PC4）**，分压后测电池电压 |
+| 参数存储 | 内部 Flash **Sector 10 / 11**（0x080C0000 / 0x080E0000，各 128 KB，双 bank） |
+| 状态灯 | PC13（低电平点亮），栈溢出时点灯 |
 
-| 任务 | 优先级 | 周期 | 功能 |
-|------|--------|------|------|
-| **IMURead** | High | 1 kHz | 读取 ICM-42605，运行 Madgwick 姿态解算 |
-| **FlyControl** | Normal | 1 kHz | 级联 PID 控制 + 电机混控 |
-| **Usart** | Low | ~60 Hz | RC 信号解析、遥测下发、电池 ADC 读取 |
-| **BaroRead** | Low | 50 Hz | 读取 BMP280 气压计，滑动平均滤波 |
+> 电机输出用 0~4200 的"计数"而非 1000~2000 的 PWM 微秒，换算见 `MOTOR_MIN/MOTOR_MAX`（flycontrol.h）。
+> 电调需要能接受 20 kHz PWM；若电调不兼容，改 `tim.c` 里 TIM3 的 Prescaler 即可。
 
-### 任务间通信
+---
 
-- `rcFrameQueueHandle` — 遥控器数据队列 (RC → FlyControl)
-- `imuFlyQueueHandle` — IMU 数据队列 (IMURead → FlyControl)
-- `imuUsartQueueHandle` — IMU 遥测队列 (IMURead → Usart)
-- `altFlyQueueHandle` — 高度数据队列 (BaroRead → FlyControl)
-- `altUsartQueueHandle` — 高度遥测队列 (BaroRead → Usart)
-- `usart1RxStreamBuf` — UART DMA 接收流缓冲区 (ISR → Usart)
-- `uart1TxSem` — UART DMA 发送互斥信号量
-
-### 控制算法
-
-**级联 PID 结构** — 外环角度环 + 内环角速率环：
-
-```
-目标角度 → [外环 PID] → 目标角速率 → [内环 PID] → 电机混控 → PWM
-```
-
-支持三种飞行模式：
-
-- **ANGLE (自稳模式)**: 常规姿态自稳，摇杆控制角度
-- **ALTITUDE_HOLD (定高模式)**: 基于气压计的高度锁定
-- **LANDING/LANDED**: 自动降落与地面检测
-
-附加功能：
-- 电池电压补偿 — 随电压下降自动补偿油门
-- 悬停油门自适应学习 — 稳态时跟踪维持悬停所需的油门值
-- 倾斜角补偿 — 大倾斜角度时自动补偿推力损失
-
-### 滤波器
-
-- 滑动平均滤波器 (Moving Average)
-- 一阶低通滤波器 (Low Pass)
-- 二阶陷波滤波器 (Notch Filter)
-- 一维卡尔曼滤波器 (Kalman Filter)
-- 互补滤波器 (Complementary Filter)
-- Alpha-Beta 滤波器
-
-### 姿态解算
-
-- **Madgwick AHRS** 算法 — 默认
-- **Mahony AHRS** 算法 — 备选
-
-## 通信协议
-
-### 上行 (遥控 → 飞控) — 32 字节
-
-| 偏移 | 字段 | 说明 |
-|------|------|------|
-| 0 | head | 帧头 `0x4020` |
-| 2 | roll | 横滚通道 |
-| 4 | pitch | 俯仰通道 |
-| 6 | throttle | 油门通道 |
-| 8 | yaw | 偏航通道 |
-| 10 | arm | 解锁/上锁 (`2000` = 解锁) |
-| 12 | mode | 飞行模式 |
-| 14-22 | PID 参数 | 在线调参支持 |
-| 28 | roll_offset | 横滚中位偏移 |
-| 30 | checksum | 校验和 |
-
-### 下行 (飞控 → 地面站) — 24 字节
-
-| 偏移 | 字段 | 说明 |
-|------|------|------|
-| 0 | head | 帧头 `0x4020` |
-| 2 | bat | 电池百分比 |
-| 4 | roll/pitch/yaw | 姿态角 |
-| 16 | altitude | 高度 |
-| 20 | rssi | 链路接收质量 |
-| 22 | checksum | 校验和 |
-
-## 开发环境
-
-- **IDE**: Keil MDK-ARM v5
-- **MCU 支持包**: STM32F4xx_DFP
-- **HAL 驱动**: STM32F4xx_HAL_Driver
-- **工具链**: ARMCC / ARMCLANG
-
-
-## 工程结构
+## 2. 仓库结构
 
 ```
-├── Core/                       # 应用代码
-│   ├── Inc/                    # 头文件
-│   │   ├── main.h
-│   │   ├── flycontrol.h        # 飞控 PID 控制
-│   │   ├── icm42605.h          # IMU 驱动
-│   │   ├── bmp280.h            # 气压计驱动
-│   │   ├── protocol.h          # 通信协议
-│   │   ├── filter.h            # 数字滤波器
-│   │   ├── soft_iic.h          # 软件 I2C
-│   │   ├── dwt.h               # DWT 计时
-│   │   └── FreeRTOSConfig.h
+.
+├── Core/
+│   ├── Inc/                 头文件（各模块 API）
 │   └── Src/
-│       ├── main.c
-│       ├── freertos.c          # 任务创建 & IPC
-│       ├── flycontrol.c        # 级联 PID 实现
-│       ├── icm42605.c          # IMU 驱动 & Madgwick/Mahony
-│       ├── bmp280.c            # 气压计驱动 & 高度计算
-│       ├── protocol.c          # 串口协议解析
-│       ├── filter.c            # 各类滤波器实现
-│       ├── soft_iic.c          # GPIO 模拟 I2C
-│       ├── dwt.c               # DWT 微秒计时
-│       └── ...
-├── Drivers/                    # STM32 HAL / CMSIS
-├── Middlewares/                 # FreeRTOS
-├── MDK-ARM/                    # Keil 项目文件
-└── f405.ioc                    # CubeMX 配置
+│       ├── freertos.c       ★ 任务调度 + 飞行状态机 + 降落/油门曲线 + 滤波调度
+│       ├── flycontrol.c     ★ 串级 PID + 混控 + 抗饱和 + 高度环
+│       ├── height_estimator.c ★ 三状态高度观测器
+│       ├── param.c          ★ 参数表 + CFG 命令 + 历史回滚
+│       ├── blackbox.c       ★ W25Q128 记录 + BB 命令
+│       ├── filter.c         LPF / 陷波 / 一阶滤波
+│       ├── icm42605.c       IMU 驱动 + 上电标定
+│       ├── bmp280.c         气压计驱动 + 温度补偿
+│       ├── flash_ee.c       内部 Flash 模拟 EEPROM（双 bank）
+│       ├── protocol.c       遥控帧解析 / 校验
+│       ├── soft_iic.c       软件 IIC
+│       └── main.c / gpio.c / tim.c / usart.c / spi.c / i2c.c / adc.c / dma.c …
+├── Drivers/                 STM32F4 HAL + CMSIS
+├── Middlewares/             FreeRTOS + CMSIS-RTOS v2
+├── MDK-ARM/f405.uvprojx     Keil 工程
+├── tools/                   ★ 上位机工具链（见 tools/README.md）
+├── docs/                    Flash EEPROM 设计文档
+└── f405.ioc                 CubeMX 工程文件
 ```
 
+---
 
-## License
+## 3. 编译与烧录
+
+### 3.1 Keil MDK（正式构建）
+
+```
+打开 MDK-ARM/f405.uvprojx → Build (F7) → Download (F8)
+```
+
+工具链：ARMCC v5.06（AC5），C99，`-O1`。
+
+### 3.2 命令行语法检查（不生成镜像）
+
+没有 Keil 时也可以用 armcc 单独编译某个源文件做检查：
+
+```powershell
+C:\Keil_v5\ARM\ARMCC\bin\armcc.exe --cpu Cortex_M4.fp -c --c99 -O1 -W `
+  -DUSE_HAL_DRIVER -DSTM32F405xx `
+  -ICore\Inc -IDrivers\STM32F4xx_HAL_Driver\Inc `
+  -IMiddlewares\Third_Party\FreeRTOS\Source\include `
+  -o MDK-ARM\_chk.o Core\Src\flycontrol.c
+```
+
+### 3.3 首次上电流程
+
+1. 烧录后上电，保持**水平静止 3 秒**（气压计参考面 + 陀螺零偏在此建立）；
+2. 串口 460800 连接 USART3，发 `BB:CAL` 看标定质量（`BB:STAT` 里也有）；
+3. 检查参数：`python tools/bb.py cfg list`（应有 82 项）；
+4. 解锁前确认：水平、桨已装好、模式开关在手动位。
+
+---
+
+## 4. 软件架构
+
+### 4.1 FreeRTOS 任务
+
+| 任务 | 优先级 | 周期 | 栈 | 职责 |
+|---|---|---|---|---|
+| `IMURead` | High | 1 ms | 2 KB | 读 ICM42605 → Madgwick 姿态 → LPF/陷波 → 投递 IMU 包 |
+| `FlyControl` | Low2 | 1 ms | 1 KB | 读 RC/IMU/高度 → 状态机 → 串级 PID → 混控 → PWM，并投递黑匣子帧 |
+| `BaroRead` | Low1 | 50 ms | 2 KB | 读 BMP280 → 高度观测器 → 投递高度/垂速 |
+| `Usart` | Low | 16 ms | 1 KB | 解析 USART1 遥控帧（32 B，含校验）→ 更新 `current_rc`，回传 24 B 状态帧 |
+| `BlackBox` | Low | 事件驱动 | 2 KB | 读 USART3 命令、把 RAM 环形里的帧写入 W25Q128 |
+
+### 4.2 数据流
+
+```
+        ICM42605 ──SPI1──► IMURead ──► imuFlyQueue(深度1) ──►┐
+                              └──────► imuUsartQueue ──► Usart(遥测) │
+                                                                    │
+        BMP280 ──soft IIC──► BaroRead ──► HeightEstimator          │
+                              ├──► altFlyQueue(高度) ──────────────►┤
+                              └──► vertVelocityQueue(垂速) ────────►┤
+                                                                    ▼
+   遥控器 ──USART1──► Usart ──► rcFrameQueue(深度3) ──────────► FlyControl
+                                                                    │
+                                                    ┌───────────────┼──────────────┐
+                                                    ▼               ▼              ▼
+                                              TIM3 PWM(电机)   黑匣子 RAM 环   串口遥测
+                                                                    │
+                                                          BlackBox ──SPI3──► W25Q128
+```
+
+关键约定：
+
+- **队列深度基本都是 1**（除 RC 帧）——要的是"最新值"，宁可丢旧帧也不排队积压；
+- 黑匣子写 Flash 只在 `BlackBox` 任务里做，飞行任务只往 RAM 环形缓冲写（单生产者，无锁）；
+- 所有跨任务共享结构都只在单一任务里写，避免加锁。
+
+---
+
+## 5. 飞行控制
+
+### 5.1 通道与模式
+
+遥控帧 32 B，字段顺序见 `protocol.h` 的 `Rx_Frame_t`：
+
+| 通道 | 含义 | 备注 |
+|---|---|---|
+| `roll` / `pitch` / `yaw` | 摇杆 1000~2000 | 中位 1500 |
+| `throttle` | 油门 1000~2000 | 手动模式经**油门曲线**映射 |
+| `arm` | **2000 = 解锁**，其它 = 上锁 | 严格等于 2000 |
+| `mode` | **1000 = 定高，1500 = 手动，2000 = 降落** | 相邻档间隔 500，判定带宽 ±250 |
+| `angle_p/i/d`、`rate_p/i/d`、`roll/pitch_offset` | 预留（参数改走 `CFG:`） | — |
+
+**模式判定**用区间而不是精确相等（遥控通道是模拟量，切换途中会出现 1480 这类值），
+并且**连续保持 250 ms 才真正生效** —— 拨开关时扫过中间位的那几十毫秒会被吃掉。
+
+### 5.2 控制链路
+
+```
+摇杆 → 目标角度（stick.deg_per_unit = 9°/单位）
+     → 角度外环（pid.*_outer）→ 目标角速率
+     → 角速率内环（pid.*_inner）→ 力矩
+     → 混控（X 型）→ 四路 PWM
+```
+
+外环/内环都是标准 PID（`kp/ki/kd/imax/dlpf`），`dlpf` 是微分项低通系数。
+
+默认值（`param.c`）：
+
+| 组 | kp | ki | kd | imax | dlpf |
+|---|---|---|---|---|---|
+| roll/pitch 外环 | 9.0 | 1.0 | 0.12 | 20 | 0.16 |
+| roll/pitch 内环 | 10.0 | 0.25 | 0.16 | 8 | 0.20 |
+| yaw 外环 | 2.0 | 0.10 | 0.02 | 20 | 0.16 |
+| yaw 内环 | 6.0 | — | — | — | — |
+
+### 5.3 混控与抗饱和
+
+X 型混控后每路电机会被单独限幅到 `[0, 4200]`，**单独限幅会改变四路均值** → 平均推力变了 →
+飞机自己往上窜或往下掉。实测抖动打杆时 `Σm²/(4·mean²)` 曾到 1.93，等于凭空多了 93% 的推力。
+
+处理方式（`flycontrol.c`）：限幅**之前**把差动按比例缩到刚好能放进可用行程
+
+```c
+head = 2 * min(final_throttle - MOTOR_MIN, MOTOR_MAX - final_throttle);  // 可用行程
+kk   = ((mx - mn) > head) ? (head / (mx - mn)) : 1.0f;                   // 差动缩放系数
+m_i  = final_throttle + (m_i - final_throttle) * kk;                     // 均值不变
+```
+
+缩放系数记进黑匣子 `flags` bit2，`mix_scale < 1` 的样本比例就是"抗饱和介入率"。
+
+### 5.4 手动油门曲线
+
+手动模式（HORIZON）专用，四点分段线性：
+
+```
+摇杆 1000 ──────── x1 ──────── x2 ──────── 2000
+输出   0 ─────────── y1 ─────── y2 ─────── 1.0
+```
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `thr.cv_x1` | 1500 | 缓区起点 |
+| `thr.cv_y1` | 0.50 | 该点输出比例 |
+| `thr.cv_x2` | 1700 | 缓区终点 |
+| `thr.cv_y2` | 0.70 | 该点输出比例 |
+
+**默认值与直线完全重合**，不调就等于没开。想让悬停附近更细腻，把 `x1` 放在悬停杆位、
+`y2` 只比 `y1` 大一点点即可（GUI「油门曲线」页签可以实时看曲线和"比线性细多少倍"）。
+参数写坏（`x2<=x1` 或 `y2<=y1`）时整体退回直线。
+
+### 5.5 定高
+
+```
+摇杆 → 目标高度： alt.stick_base + (throttle - 1000) / alt.stick_range
+                 （默认 base=1.0、range=500 → 杆位 1000/1500/2000 对应 1.0/2.0/3.0 m）
+目标高度 → 外环 PID（高度→垂速）→ 目标垂速（限幅 ±alt.rate_max）
+目标垂速 → 内环 PID（垂速→油门修正）→ 修正量
+总油门 = 悬停基准（自学习）+ 修正量
+```
+
+高度环的两个 PID **写死在 `flycontrol.c`**（不在参数表里）：
+
+| 环 | kp | ki | kd | 积分限幅 |
+|---|---|---|---|---|
+| 高度 → 垂速（外环） | 30.0 | 3.0 | 3.0 | 300 |
+| 垂速 → 油门（内环） | 4.0 | 0 | 2.0 | 100 |
+
+几个关键设计：
+
+- **基准用学到的悬停油门**，不是固定值 → 换电池、换桨后手感一致；
+- **电池电压补偿**：`thr.scale / (电压 * thr.comp_a + thr.comp_b)`，把控制量换算成 PWM 时归一化；
+- **悬停油门自学习**：解锁后的稳定悬停段缓慢收敛基准值，落地上锁时存入 EEPROM
+  （`alt.hover_throttle`、`alt.ref_pct`），下次上电直接用；
+- **抗积分饱和**：垂速误差按 `rate_max / kp_a` 限幅，防止长时间顶死积分。
+
+### 5.6 降落（开关 2000 位）
+
+状态机：`LANDING` → `LANDED`（断电后保持，直到飞手换模式或上锁）。
+
+1. 进入时记录当前高度作为起点，油门基准 = 悬停油门；
+2. 垂直速度由 **flare 剖面**接管（`flycontrol.c`）：
+
+   ```
+   目标下降率 = -clamp(alt * 0.8, alt.land_flare, alt.rate_max)
+   ```
+
+   离地越低越慢，最后收敛到 `alt.land_flare`（默认 0.25 m/s）；
+3. 触地判据见下，命中后置 `LANDED`、油门归零；
+4. **落地后拨到定高或手动就是重新起飞**（飞手的明确意图）。
+
+#### 触地判据（按可靠性排序）
+
+| # | 判据 | 门限 | 说明 |
+|---|---|---|---|
+| **0** | **加计冲击** | `\|a\| > 2.5 g` 连续 3 ms | 实测触地 2.84~15.8 g，空中振动最大 1.99 g。**不受气压门控影响**，5 ms 内断电 |
+| 1 | 垂速塌陷 | 400 ms 内曾 < −0.15 m/s，且最近 200 ms 平均垂速 < 0.12 m/s | 与绝对高度无关；用平均值是因为贴地时融合垂速会抖 ±0.09 |
+| 2 | 贴地高度兜底 | 高度 < 0.08 m **且** 平均垂速 < 0.12 m/s | 必须垂速也停住，否则"起降点不等高"时会提前断电 |
+| 3 | 气压门控升级 | 触地条件累计满足 800 ms | 气压反复跳变时强制放行，避免桨在地面磨到超时 |
+| 4 | 超时 | `alt.land_timeout`（默认 40 s） | 最后兜底 |
+
+判据 1/2 需要连续 200 ms 才断电，并受两道保护：
+
+- **气压卫生门控**：最近 400 ms 内出现 `|Δ气压高度|/Δt > 6 m/s`（桨洗撞地的瞬态）→ 推迟断电；
+- **确认窗内降油门**：判到触地但还没确认时，油门先压到悬停的 85%（地面效应下刚好贴住地面），
+  避免这 0.2 秒里被多余推力顶起来"弹一下"。
+
+断电原因记在数据帧 `flags` bit3-5：`0=无 1=贴地高度 2=垂速塌陷 3=超时 4=门控升级 5=加计冲击`。
+
+#### 起降点不等高
+
+判据**不依赖绝对高度**，所以落脚点比起飞点高/低都能在**离地 0 m** 处断电（实测 1~4 m 落差模拟，
+断电点都在离地 ±0.00 m）。但落差 > 3~4 m 时最后那段 0.25 m/s 的蠕动会很久，建议手工落地或加测距。
+
+### 5.7 安全相关
+
+| 机制 | 位置 | 说明 |
+|---|---|---|
+| 上锁立即停桨 | `freertos.c` | `arm != 2000` 时四路输出清零（含清除历史值） |
+| `LANDED` 状态 | 同上 | 断电后不再重新进入控制，必须飞手换模式 |
+| 解锁期间禁止存参数 | `param.c` | `CFG:SAVE` 解锁状态下返回 `CFG:ERR armed` |
+| 参数越界回退 | `height_estimator.c` / `flycontrol.c` | 增益不满足稳定条件时用默认值，并置 `gain_rejected` 标志 |
+| 栈溢出钩子 | `freertos.c` | `configCHECK_FOR_STACK_OVERFLOW=2`，**不停机**只计数+点灯（飞行中停机更危险） |
+| 循环周期监控 | `BB:JITTER` | IMU/FlyControl 的最大执行时间与超时次数 |
+
+---
+
+## 6. 高度估计器
+
+三状态观测器（`height_estimator.c`）：
+
+```
+状态: [高度, 垂速, 加计偏置]
+预测: 高度 += 垂速·dt;   垂速 += (加计 - 偏置)·dt
+校正: innov = 气压高度 - 高度
+      高度 += Kb·innov·dt;   垂速 += Kp·innov·dt;   偏置 -= Kv·innov·dt
+```
+
+闭环特征多项式 `s³ + Kb·s² + Kp·s + Kv`，稳定的充要条件 **`Kb·Kp > Kv`**。
+
+| 参数 | 默认 | 实际修正的状态 |
+|---|---|---|
+| `est.Kb` | 12.0 | **高度**（跟气压计走多快） |
+| `est.Kp` | 2.40 | **垂速** |
+| `est.Kv` | 0.16 | **加计偏置**（学多快） |
+
+> ⚠ 命名是按多项式系数取的，不是按状态名 —— `est.Kp` 不是位置增益。
+
+**定值方法（三重极点法）**：让三个极点都落在 `−1/T`，则 `Kb = 3/T, Kp = 3/T², Kv = 1/T³`。
+T 是校正时间常数，可取 2~3 s（`Kb≈1.0~1.5, Kp≈0.33~0.75, Kv≈0.04~0.125`）。T 越小跟得越快但气压噪声
+进得越多；T 太大则快速下坠时融合高度会滞后（T=5 s 那组纠正 2.4 m/s 误差要 10 秒，实测曾导致发散）。
+
+**三道气压卫生措施**：
+
+1. **创新限幅** ±2 m —— 单次异常不让它把状态拖走；
+2. **重新锁定** —— 创新连续 300 ms 顶在限幅上，直接把高度拉回气压计、垂速清零（偏置保留）；
+3. **气压跳变门控** —— 每秒变化 > 6 m 视为桨洗/气流扰动，冻结触地判据 400 ms。
+
+---
+
+## 7. 参数系统
+
+82 项参数存在**内部 Flash 模拟 EEPROM**（双 bank + 序列号 + 历史记录），与黑匣子那颗 W25Q128 无关
+（`BB:ERASE` 不会动它）。设计细节见 `docs/flash_eeprom_design.md`。
+
+### 7.1 命令
+
+| 命令 | 作用 |
+|---|---|
+| `CFG:LIST` / `CFG:LISTEND` | 列出全部参数（带 `applied=` 表示当前生效值） |
+| `CFG:GET <名字或ID>` | 查询单项 |
+| `CFG:SET <名字或ID> <值>` | 写入"待生效"值（越界会自动 clamp 并回报） |
+| `CFG:SAVE` | 提交到 Flash（双 bank 轮换 + 序列号递增） |
+| `CFG:RELOAD` | 从 Flash 重新加载 |
+| `CFG:INFO` | 表信息：项数、来源、dirty、序列号、bank、历史用量 |
+| `CFG:HIST` | 历史记录列表 |
+| `CFG:ROLLBACK <n>` | 回滚到第 n 条历史 |
+| `CFG:CAL` | 触发陀螺/加计标定 |
+
+### 7.2 语义
+
+- **改参数 = 改"待生效"表**，必须 `CFG:SAVE` 才进 Flash；
+- **绝大多数参数重启后生效**（`applied=` 与当前值不同就说明还没重启）；
+- 参数按名字寻址，固件升级增删参数时**按 ID 加载、缺项补默认**，老记录不会丢。
+
+### 7.3 分组一览
+
+| 前缀 | 内容 | 数量（约） |
+|---|---|---|
+| `pid.*` | 姿态串级 PID（roll/pitch/yaw × outer/inner × 5 项） | 41 |
+| `est.*` | 高度观测器增益 | 3 |
+| `notch.*` | 陷波频率/带宽 | 2 |
+| `stick.*` | 摇杆灵敏度、偏航速率比例 | 2 |
+| `thr.*` | 油门换算、电压补偿、曲线四点、油门阈值 | 11 |
+| `alt.*` | 定高/降落：速率上限、摇杆范围、flare、超时、悬停油门 | 9 |
+| `cal.*` | 陀螺/加计零偏与刻度（由 `CFG:CAL` 写） | 6 |
+| `gyro.*` / `accel.*` / `ahrs.*` | 陀螺三轴 LPF、垂直加计 LPF、Madgwick beta | 5 |
+| `ctrl.*` / `bb.*` | 姿态微调偏置、黑匣子记录开关 | 3 |
+
+---
+
+## 8. 黑匣子（W25Q128）
+
+详细说明见 **[tools/README.md](tools/README.md)**，这里只列要点。
+
+- 16 MB，4 KB 扇区，每扇区 120 帧（每帧 32 B），扇区头带索引（`0xA5`）；
+- 帧类型：`0x01` 飞行数据（**约 1 kHz**，与 1 kHz 控制环同步）、`0x02` 诊断（每 64 帧）、
+  `0x03` 摇杆（每 32 ms）、`0x04` 高度帧（20 Hz，跟气压样本走）；
+- **只在解锁期间记录**，落地后自动停；RAM 环形缓冲，由低优先级任务刷入 Flash；
+- 命令：`BB:STAT`、`BB:DUMP`、`BB:ERASE`、`BB:CAL`、`BB:HOVER`、`BB:STEP` 等（`ERASE`/`DUMP` 需未解锁）。
+
+---
+
+## 9. 上位机工具链
+
+`tools/` 目录，依赖 Python 3（绘图需 matplotlib）。完整用法见 [tools/README.md](tools/README.md)。
+
+| 工具 | 用途 |
+|---|---|
+| `bb.py` | 主入口：状态/导出/分析/参数/阶跃/串口 |
+| `bb_analyze.py` | 离线分析，输出中文判读报告 + 出图 |
+| `bb_gui.py` | tkinter 图形面板（参数、油门曲线、历史回滚、预设、黑匣子、校准） |
+| `bb_cfg.py` | 参数读写与命令封装 |
+| `bb_format.py` | 帧格式解析（32 B 定长帧） |
+| `bb_step.py` | 阶跃响应专项分析 |
+| `ee_parse.py` | 内部 Flash EEPROM 镜像解析 |
+| `selftest_format.py` | 固件↔上位机格式一致性自检 |
+
+### 典型工作流
+
+```bash
+# 1. 连通性
+python bb.py status
+
+# 2. 导出 + 分析（打印报告、出图、导 CSV）
+python bb.py flash flash.bin --sec 900
+python bb.py analyze flash.bin --plot --csv
+
+# 3. 改参数
+python bb.py cfg list
+python bb.py cfg set alt.land_flare 0.20
+python bb.py cfg save
+python bb.py cfg reboot
+
+# 4. 图形面板
+bb_gui.bat            # 或双击 BB面板.lnk
+```
+
+分析报告里最该盯的几项：
+
+| 报告项 | 关注点 |
+|---|---|
+| `混控抗饱和` | 介入率应 < 10%；高机动时允许短时升高 |
+| `单路均值 / 极差` | 极差 > 100 PWM 说明重心偏或某电机效率异常 |
+| `结构振动` | 加计 RMS > 0.1 g 需要动平衡桨，并检查陷波频率 |
+| `创新` / `innov_clamped` | 长期有直流偏置或被限幅 = 高度估计器跟不动 |
+| 阶跃报表 | 上升时间、超调、稳定时间、一阶 τ |
+
+---
+
+## 10. 调参指南（速查）
+
+| 现象 | 先看 | 常用手段 |
+|---|---|---|
+| 姿态发飘、抖动 | 阶跃报表的超调/稳定时间 | 内环 `kp`↑ 提刚度，`kd`↑ 抑超调；抖动先查振动/陷波 |
+| 打杆时掉高/窜高 | `混控抗饱和` 介入率 | 治本：重心/电机一致性；治标：减内环增益 |
+| 定高忽高忽低 | 垂速噪声、`innov` | `est.*` 按 T=2~3 s 三重极点重算；检查气压跳变 |
+| 落地弹跳 | `flags bit3-5` 原因码 | 确认加计冲击判据生效（原因 5）；软着陆可降 `land_flare` |
+| 落地太慢 | 总耗时 | `alt.land_flare` ↑、`alt.rate_max` ↑ |
+| 悬停附近不好微调 | 油门曲线 | 压平 `thr.cv_*` 缓区（见 5.4） |
+| 气压计被桨洗带偏 | `innov` 波形 | 检查气压计避震/导流；必要时收紧 `BARO_JUMP_RATE_MAX` |
+
+调参后用 `selftest_format.py` + `bb.py selftest` + `bb_gui.py --selftest` 三套自检确认工具链没被带坏。
+
+---
+
+## 11. 已知限制
+
+1. **气压计漂移**：实测 ~0.7 m / 45 s。定高是"相对上电点"的绝对高度，不是真 AGL；飞过长坡真离地高度会变。
+2. **地面效应**：5 寸桨的地面效应集中在最后 7~10 cm（推力增益 +5%~19%），所以它只能做"接近地面"的标记，
+   不能单独当触地判据。
+3. **起降点落差**：判据本身与绝对高度无关，但落差 > 3~4 m 时最后 0.25 m/s 的蠕动会很久（超时 40 s 会兜底）。
+   想要任意落差稳定落地，需要加测距（ToF）。
+4. **振动**：实测 286~325 Hz 结构振动，加计 0.23 g（会随油门漂移）。陷波默认 315 Hz/1 倍频程，
+   只能压住控制环里的表现，治本要动平衡桨。
+5. **遥控 arm 通道是严格等于 2000**，摇杆/开关输出有偏差时可能解不开锁（可在 `freertos.c` 改判据）。
+6. **参数改动需重启**：除少量飞行中生效的量，绝大多数参数 `CFG:SAVE` 后要重启才 `applied`。
+
+---
+
+## 12. License
 
 本项目基于 MIT 协议开源。

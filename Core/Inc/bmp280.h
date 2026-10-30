@@ -33,6 +33,16 @@ extern "C" {
 #define BMP280_OS_X8       0x04
 #define BMP280_OS_X16      0x05
 
+/* CONFIG 寄存器(0xF5)的 IIR 系数编码（bit4:2），系数越大越平越慢 */
+#define BMP280_IIR_OFF     0x00
+#define BMP280_IIR_COEF_2  0x04
+#define BMP280_IIR_COEF_4  0x08
+#define BMP280_IIR_COEF_8  0x0C
+#define BMP280_IIR_COEF_16 0x10
+
+/* 气压计读取周期(ms)。×16 过采样单次转换约 40ms，必须大于它才不会读到重复样本。 */
+#define BMP280_READ_PERIOD_MS   50U
+
 #define WINDOW_SIZE 32
 
 typedef struct {
@@ -51,9 +61,12 @@ typedef struct {
 } BMP280_CalibData;
 
 typedef struct {
-    float temperature;
-    float pressure;
-    float altitude;
+    float temperature;   /* °C */
+    /* ★ 单位是 Pa，不是 hPa！Bosch 的 64 位补偿返回 Q24.8(=Pa×256)，
+     *   bmp280.c 里 /256 之后就得到 Pa，海平面典型值 101325。
+     *   曾经把它当 hPa 用过，直接把整条高度链路判废。 */
+    float pressure;      /* Pa */
+    float altitude;      /* m（ISA 标准大气，基准 101325Pa；压力非法时是 NaN） */
 
     int32_t raw_pressure;
     int32_t raw_temperature;
@@ -68,6 +81,7 @@ uint8_t BMP280_Init(BMP280_Data *data);
 void BMP280_ReadCalibData(BMP280_Data *data);
 void BMP280_ReadRawData(BMP280_Data *data);
 void BMP280_CompensateData(BMP280_Data *data);
+/* pressure 单位 **Pa**；超出 30000~120000 返回 NaN */
 float BMP280_CalcAltitude(float pressure);
 
 

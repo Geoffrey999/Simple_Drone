@@ -29,7 +29,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "flash_ee.h"
+#include "param.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -89,6 +90,15 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+
+  /* 内部 Flash 模拟 EEPROM：扫描 Bank A/B，找最新一条有效配置。
+   * 只做 Flash 读（两百多个槽，几毫秒），不打印 —— 串口还没初始化。
+   * 返回值不用管：失败时 EE 会自己锁成只读，CFG:INFO 里能看到原因。 */
+  (void)EE_Init();
+
+  /* 参数表：EE → 待生效表 → 生效快照。之后飞行代码只读"生效"那一份，
+   * 所以 CFG:SET 的改动必须 SAVE + 重启才会起作用（这是故意的）。 */
+  Param_Init();
 
   /* USER CODE END SysInit */
 

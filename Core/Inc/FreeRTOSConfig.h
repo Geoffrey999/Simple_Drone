@@ -56,7 +56,7 @@
 #define CMSIS_device_header "stm32f4xx.h"
 #endif /* CMSIS_device_header */
 
-#define configENABLE_FPU                         0
+#define configENABLE_FPU                         1
 #define configENABLE_MPU                         0
 
 #define configUSE_PREEMPTION                     1
@@ -69,6 +69,13 @@
 #define configMAX_PRIORITIES                     ( 56 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
 #define configTOTAL_HEAP_SIZE                    ((size_t)15360)
+
+/* 栈溢出检测。原来没有定义 = 溢出完全静默，只会悄悄破坏内存。
+ * level 2 用 0xA5 填充栈并在每次任务切换时校验最后 20 字节，
+ * 能抓到"任务栈用过头"这类隐蔽问题。
+ * 触发时调用 vApplicationStackOverflowHook()（实现在 freertos.c），
+ * 会累加计数、记录任务名、点亮 PC13。 */
+#define configCHECK_FOR_STACK_OVERFLOW           2
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configUSE_TRACE_FACILITY                 1
 #define configUSE_16_BIT_TICKS                   0

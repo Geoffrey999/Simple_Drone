@@ -11,6 +11,7 @@ extern "C" {
 
 #define RX_FRAME_SIZE          32
 #define TX_FRAME_SIZE          24
+#define FRAME_HEADER        0x2040
 #define BATTERY_MIN_VOLTAGE	2820.0f		//3.4V
 #define BATTERY_MAX_VOLTAGE	3490.0f		//4.2V
 #define SCALING_FACTOR			6.7f		  //(BATTERY_MAX_VOLTAGE-BATTERY_MIN_VOLTAGE)/100
@@ -56,8 +57,8 @@ typedef struct {
 } Rx_Frame_t;
 
 extern uint8_t Usart1DmaBuf[RX_FRAME_SIZE];
-extern volatile uint16_t Usart1RxLen;
-extern uint16_t Throttle;
+//extern volatile uint16_t Usart1RxLen;
+//extern uint16_t Throttle;
 
 void USART1_DMA_Rx_Init(void);
 uint16_t Calculate_Checksum(const uint8_t* data, uint16_t len);

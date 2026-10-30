@@ -74,9 +74,25 @@ uint8_t BMP280_Init(BMP280_Data *data)
 
 	osDelay(10);
 
-	BMP280_WriteReg(BMP280_REG_CONFIG, 0x00);
+	/* ── CONFIG 寄存器 (0xF5) ──
+	 *   bit7:5 t_sb   ：两次测量之间的待机时间，000 = 0.5ms
+	 *   bit4:2 filter ：IIR 滤波系数，000=关 / 001=2 / 010=4 / 011=8 / 100=16
+	 *   bit0   spi3w  ：三线 SPI，这里不用
+	 *
+	 * 为什么现在才打开 IIR：实测同一架次气压"相邻有效样本差"约 18cm，
+	 * 远超传感器自身噪声(0.2Pa≈1.7cm) —— 主要是桨洗气流在传感器附近造成的
+	 * 真实压力波动。原来 filter=0（全放行），这些波动直接进高度融合。
+	 * 取系数 2（最轻的一档）：噪声约降一半，代价是约 40ms 的群延迟。
+	 * 如果之后觉得高度还是抖，可以升到 4(0x08) 或 8(0x0C)，但延迟分别是
+	 * 约 80ms / 160ms，会吃掉定高环的相位裕度，别一步到位。
+	 *
+	 * 读取周期也相应从 20ms 改成 50ms（见 freertos.c）：
+	 * ×16 过采样的单次转换约 40ms，20ms 读一次约一半是重复样本（实测 48%），
+	 * 50ms 读一次能保证每次都是新转换结果，样本年龄也小。 */
+	BMP280_WriteReg(BMP280_REG_CONFIG, BMP280_IIR_COEF_2);
 
 	uint8_t ctrl = (BMP280_OS_X2 << 5) | (BMP280_OS_X16 << 2) | BMP280_MODE_NORMAL;
+
 	BMP280_WriteReg(BMP280_REG_CTRL, ctrl);
 
 	osDelay(100);
@@ -154,8 +170,18 @@ void BMP280_CompensateData(BMP280_Data *data)
 	data->altitude = BMP280_CalcAltitude(data->pressure);
 }
 
+/* 位压高度（ISA 标准大气，基准 101325Pa）。
+ *
+ * ⚠ 返回值现在会 **NaN**：压力超出 300~1200hPa 时（I2C 干扰读回 0、
+ *   补偿公式里 var1l==0、芯片没接好读回全 0xFF 等）以前会算出 44330m 这种
+ *   看着像真值的数字，直接砸进高度融合/定高环。改成 NaN 之后调用方用
+ *   `x != x` 就能一眼判掉，不会再被"合理但错误"的数值骗过。 */
 float BMP280_CalcAltitude(float pressure)
 {
+    if ((pressure != pressure) || (pressure < 30000.0f) || (pressure > 120000.0f))
+    {
+        return NAN;
+    }
     return 44330.0f * (1.0f - powf(pressure / 101325.0f, 1.0f / 5.255f));
 }
 

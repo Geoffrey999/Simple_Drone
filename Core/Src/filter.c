@@ -116,18 +116,27 @@ void Notch_Init(NotchFilter_t* filter, float sample_freq, float notch_freq, floa
     }
     
     float omega0 = 2.0f * M_PI * notch_freq / sample_freq;
-    float alpha = sinf(omega0) * sinhf(logf(2.0f) / 2.0f * bandwidth * omega0 / sinf(omega0));
-    
+
+    /* Guard against division by zero when omega0 is multiple of pi (e.g. notch_freq = sample_freq/2) */
+    float sin_omega0 = sinf(omega0);
+    if (fabsf(sin_omega0) < 1e-6f) {
+        sin_omega0 = 1e-6f;
+    }
+    float alpha = sin_omega0 * sinhf(logf(2.0f) / 2.0f * bandwidth * omega0 / sin_omega0);
+
     float cos_omega0 = cosf(omega0);
-    
+
     filter->b0 = 1.0f;
     filter->b1 = -2.0f * cos_omega0;
     filter->b2 = 1.0f;
-    
+
     float a0 = 1.0f + alpha;
+    if (fabsf(a0) < 1e-6f) {
+        a0 = 1e-6f;
+    }
     filter->a1 = -2.0f * cos_omega0;
     filter->a2 = 1.0f - alpha;
-    
+
     filter->b0 /= a0;
     filter->b1 /= a0;
     filter->b2 /= a0;
